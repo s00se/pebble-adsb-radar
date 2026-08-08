@@ -7,6 +7,26 @@ let radarRangeNm = DEFAULT_RADAR_RANGE_NM;
 let refreshTimer = null;
 let requestRunning = false;
 
+// Manual location (optional). When set, the phone will use this instead of
+// the device GPS. Persisted to localStorage as JSON {lat, lon}.
+let manualLat = null;
+let manualLon = null;
+
+// Try to restore persisted manual location
+try {
+  const stored = localStorage.getItem("manual_location");
+  if (stored) {
+    const parsed = JSON.parse(stored);
+    if (typeof parsed.lat === "number" && typeof parsed.lon === "number") {
+      manualLat = parsed.lat;
+      manualLon = parsed.lon;
+      console.log("Restored manual location: " + manualLat + ", " + manualLon);
+    }
+  }
+} catch (err) {
+  console.log("Could not read stored manual location: " + err);
+}
+
 function degreesToRadians(degrees) {
   return degrees * Math.PI / 180;
 }
@@ -191,6 +211,14 @@ function updateRadar() {
   requestRunning = true;
   sendStatus("GETTING GPS");
 
+  // If manual location is configured, use it instead of device GPS.
+  if (typeof manualLat === "number" && typeof manualLon === "number") {
+    console.log("Using manual location: " + manualLat + ", " + manualLon);
+    sendStatus("LOADING ADS-B");
+    fetchAircraft(manualLat, manualLon);
+    return;
+  }
+
   navigator.geolocation.getCurrentPosition(
     function(position) {
       const latitude = position.coords.latitude;
@@ -214,20 +242,61 @@ function updateRadar() {
 }
 
 Pebble.addEventListener("appmessage", function(event) {
-  const requestedRange = Number(event.payload.RADAR_RANGE);
+  // Handle radar range changes as before
+  if (event.payload && event.payload.RADAR_RANGE !== undefined) {
+    const requestedRange = Number(event.payload.RADAR_RANGE);
 
-  if (ALLOWED_RADAR_RANGES_NM.indexOf(requestedRange) < 0) {
+    if (ALLOWED_RADAR_RANGES_NM.indexOf(requestedRange) < 0) {
+      return;
+    }
+
+    if (requestedRange === radarRangeNm) {
+      return;
+    }
+
+    radarRangeNm = requestedRange;
+    requestRunning = false;
+    console.log("Watch requested " + radarRangeNm + " NM range");
+    updateRadar();
     return;
   }
 
-  if (requestedRange === radarRangeNm) {
-    return;
-  }
+  // Manual location support: MANUAL_LAT, MANUAL_LON, MANUAL_CLEAR
+  if (event.payload) {
+    if (event.payload.MANUAL_CLEAR) {
+      manualLat = null;
+      manualLon = null;
+      try {
+        localStorage.removeItem("manual_location");
+      } catch (err) {
+        console.log("Could not clear stored manual location: " + err);
+      }
+      requestRunning = false;
+      console.log("Manual location cleared");
+      sendStatus("MANUAL CLEARED");
+      updateRadar();
+      return;
+    }
 
-  radarRangeNm = requestedRange;
-  requestRunning = false;
-  console.log("Watch requested " + radarRangeNm + " NM range");
-  updateRadar();
+    const lat = event.payload.MANUAL_LAT !== undefined ? Number(event.payload.MANUAL_LAT) : NaN;
+    const lon = event.payload.MANUAL_LON !== undefined ? Number(event.payload.MANUAL_LON) : NaN;
+
+    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      manualLat = lat;
+      manualLon = lon;
+      try {
+        localStorage.setItem("manual_location", JSON.stringify({ lat: manualLat, lon: manualLon }));
+      } catch (err) {
+        console.log("Could not persist manual location: " + err);
+      }
+
+      requestRunning = false;
+      console.log("Manual location set: " + manualLat + ", " + manualLon);
+      sendStatus("MANUAL SET");
+      updateRadar();
+      return;
+    }
+  }
 });
 
 Pebble.addEventListener("ready", function() {
